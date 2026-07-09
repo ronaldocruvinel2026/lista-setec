@@ -523,7 +523,7 @@ global.XLSX=XLSX;
       </div>
       <div class="import-status" id="importStatus"></div>
       <div class="import-note">
-        <b>Formato da planilha (.xlsx):</b> a primeira linha deve conter os títulos das colunas, na ordem: <b>FABRICANTE</b>, <b>PRODUTO</b>, <b>PRINCIPIO ATIVO (I.A)</b> e <b>PREÇO</b>. A coluna Princípio Ativo é opcional. Preços em branco ou zerados entram como "sem preço". Para separar por tipo, use abas com o nome <b>DEFENSIVOS</b> e/ou <b>ESPECIALIDADES</b> — se a planilha tiver só uma aba, tudo entra como Defensivos. Produtos com fabricante + nome iguais aos já existentes são ignorados (não duplica).
+        <b>Formato da planilha (.xlsx):</b> a primeira linha deve conter os títulos das colunas, na ordem: <b>FABRICANTE</b>, <b>PRODUTO</b>, <b>PRINCIPIO ATIVO (I.A)</b> e <b>PREÇO</b>. A coluna Princípio Ativo é opcional. Preços em branco ou zerados entram como "sem preço". Para separar por tipo, use abas com o nome <b>DEFENSIVOS</b> e/ou <b>ESPECIALIDADES</b> — se a planilha tiver só uma aba, tudo entra como Defensivos. Produtos novos são adicionados; produtos com fabricante + nome já existentes têm o <b>preço atualizado</b> automaticamente.
       </div>
       <div class="example-wrap">
         <div class="example-label">Exemplo de como a planilha deve estar:</div>
@@ -832,19 +832,29 @@ function handleFile(file){
         novos=parseSheetRows(rows,'DEFENSIVOS');
       }
       if(!novos.length){ setImportStatus('err','Nenhum produto encontrado na planilha. Confira as abas e colunas.'); return; }
-      // somar à lista, evitando duplicatas (mesmo fabricante+produto)
-      const existentes=new Set(DATA.map(function(p){return norm(p.fab)+'|'+norm(p.prod);}));
-      let add=0,dup=0;
+      // mapa dos produtos existentes por fabricante+produto, para atualizar em vez de ignorar
+      const mapa={};
+      DATA.forEach(function(p){ mapa[norm(p.fab)+'|'+norm(p.prod)]=p; });
+      let add=0,upd=0;
       novos.forEach(function(p){
         const k=norm(p.fab)+'|'+norm(p.prod);
-        if(existentes.has(k)){dup++;return;}
-        existentes.add(k);
-        p._id=nextId++;
-        DATA.push(p);
-        add++;
+        const existente=mapa[k];
+        if(existente){
+          // já existe: atualiza o preço (e o princípio ativo, se vier preenchido)
+          let mudou=false;
+          if(existente.preco!==p.preco){ existente.preco=p.preco; mudou=true; }
+          if(p.ia && p.ia!==existente.ia){ existente.ia=p.ia; mudou=true; }
+          if(mudou) upd++;
+        }else{
+          // novo: adiciona
+          p._id=nextId++;
+          DATA.push(p);
+          mapa[k]=p;
+          add++;
+        }
       });
       buildStats();buildFilters();render();renderManage();
-      setImportStatus('ok','✓ '+add+' produto(s) adicionado(s).'+(dup?(' '+dup+' já existiam e foram ignorados.'):'')+' Total agora: '+DATA.length+'.');
+      setImportStatus('ok','✓ Importação concluída: '+add+' novo(s), '+upd+' preço(s) atualizado(s). Total agora: '+DATA.length+' produtos.');
     }catch(err){ setImportStatus('err','Erro ao ler a planilha: '+(err&&err.message?err.message:err)); }
   };
   reader.onerror=function(){ setImportStatus('err','Erro ao abrir o arquivo.'); };
