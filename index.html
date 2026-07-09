@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Setec Agro — Lista de Preços Defensivos 26/27</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <!-- leitor de planilha removido: versão offline sem importação -->
 <style>
 :root{
@@ -475,6 +476,8 @@ global.XLSX=XLSX;
   </div>
 </header>
 
+<div id="syncBar" style="display:none;text-align:center;font-size:13px;font-weight:600;padding:8px 12px"></div>
+
 <!-- LISTA -->
 <div id="listView">
 <div class="controls">
@@ -610,6 +613,80 @@ let nextId = DATA.length;
 let state={q:'',cat:'ALL',fab:'ALL',sort:'ia',view:'grid'};
 let mState={q:'',cat:'ALL',sel:new Set()};
 
+/* ========== CAMADA SUPABASE (sincronização online) ========== */
+const SUPABASE_URL='https://kahdclboqzyrugxwfvkl.supabase.co';
+const SUPABASE_KEY='sb_publishable_qkQsCL8qJdoX-0-cJIzuew_3pltLueR';
+let sb=null, sbReady=false;
+try{
+  if(window.supabase && window.supabase.createClient){
+    sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+    sbReady=true;
+  }
+}catch(e){ if(window.console)console.warn('Supabase indisponível:',e); }
+
+function showSync(cls,msg){
+  const bar=document.getElementById('syncBar');
+  if(!bar)return;
+  const cores={ok:['#e5efe7','#1f4a37'],err:['#fbe6e0','#b23c1c'],info:['#f6ecd4','#8a6d1f']};
+  const c=cores[cls]||cores.info;
+  bar.style.display='block';
+  bar.style.background=c[0];
+  bar.style.color=c[1];
+  bar.textContent=msg;
+  if(cls==='ok'){ setTimeout(()=>{ bar.style.display='none'; },2500); }
+}
+
+// Carrega do banco. Se o banco estiver vazio, faz a carga inicial (seed) com ORIGINAL.
+async function carregarDoBanco(){
+  if(!sbReady){ showSync('info','Modo offline — alterações não serão salvas na nuvem.'); return false; }
+  try{
+    showSync('info','Carregando dados da nuvem...');
+    let { data, error } = await sb.from('produtos').select('*').order('id',{ascending:true});
+    if(error) throw error;
+    if(!data || data.length===0){
+      // banco vazio: fazer carga inicial
+      showSync('info','Primeira vez: enviando lista inicial para a nuvem...');
+      const seed=ORIGINAL.map(p=>({cat:p.cat,fab:p.fab,prod:p.prod,ia:p.ia,preco:p.preco}));
+      // inserir em lotes de 200
+      for(let i=0;i<seed.length;i+=200){
+        const lote=seed.slice(i,i+200);
+        const r=await sb.from('produtos').insert(lote);
+        if(r.error) throw r.error;
+      }
+      const rr=await sb.from('produtos').select('*').order('id',{ascending:true});
+      data=rr.data;
+    }
+    DATA=data.map(row=>({_id:row.id, cat:row.cat, fab:row.fab, prod:row.prod, ia:row.ia||'', preco:row.preco}));
+    nextId=Math.max.apply(null,DATA.map(p=>p._id).concat([0]))+1;
+    showSync('ok','✓ Sincronizado com a nuvem — '+DATA.length+' produtos.');
+    return true;
+  }catch(e){
+    if(window.console)console.warn('Erro ao carregar do banco:',e);
+    showSync('err','Não foi possível conectar à nuvem. Exibindo lista local.');
+    return false;
+  }
+}
+
+async function sbUpdatePreco(id, preco){
+  if(!sbReady) return;
+  try{ await sb.from('produtos').update({preco:preco}).eq('id',id); }
+  catch(e){ showSync('err','Erro ao salvar preço na nuvem.'); }
+}
+async function sbDelete(ids){
+  if(!sbReady) return;
+  try{ await sb.from('produtos').delete().in('id',ids); }
+  catch(e){ showSync('err','Erro ao excluir na nuvem.'); }
+}
+async function sbInsert(prod){
+  if(!sbReady) return null;
+  try{
+    const {data,error}=await sb.from('produtos').insert([{cat:prod.cat,fab:prod.fab,prod:prod.prod,ia:prod.ia,preco:prod.preco}]).select();
+    if(error) throw error;
+    return data && data[0] ? data[0].id : null;
+  }catch(e){ showSync('err','Erro ao adicionar na nuvem.'); return null; }
+}
+
+
 const fmtBRL=n=>n.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
 const norm=s=>(s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
 const hasPrice=p=>p.preco&&p.preco>0;
@@ -683,6 +760,7 @@ function savePrice(id, raw){
     p.preco=(!isNaN(n)&&n>0)?n:null;
   }
   buildStats();buildFilters();render();renderManage();
+  sbUpdatePreco(id, p.preco);
 }
 function renderManage(){
   const r=mFiltered();
@@ -735,11 +813,13 @@ function askDelete(ids){
   document.getElementById('modalBg').classList.add('on');
 }
 function doDelete(){
-  const set=new Set(pendingDelete);
+  const ids=pendingDelete.slice();
+  const set=new Set(ids);
   DATA=DATA.filter(p=>!set.has(p._id));
   pendingDelete.forEach(id=>mState.sel.delete(id));
   document.getElementById('modalBg').classList.remove('on');
   buildStats();buildFilters();render();renderManage();
+  sbDelete(ids);
 }
 document.getElementById('modalOk').onclick=doDelete;
 document.getElementById('modalCancel').onclick=()=>document.getElementById('modalBg').classList.remove('on');
@@ -836,25 +916,45 @@ function handleFile(file){
       const mapa={};
       DATA.forEach(function(p){ mapa[norm(p.fab)+'|'+norm(p.prod)]=p; });
       let add=0,upd=0;
+      const paraAtualizar=[]; // {id, preco}
+      const paraInserir=[];   // objetos novos
       novos.forEach(function(p){
         const k=norm(p.fab)+'|'+norm(p.prod);
         const existente=mapa[k];
         if(existente){
-          // já existe: atualiza o preço (e o princípio ativo, se vier preenchido)
           let mudou=false;
           if(existente.preco!==p.preco){ existente.preco=p.preco; mudou=true; }
           if(p.ia && p.ia!==existente.ia){ existente.ia=p.ia; mudou=true; }
-          if(mudou) upd++;
+          if(mudou){ upd++; paraAtualizar.push(existente); }
         }else{
-          // novo: adiciona
           p._id=nextId++;
           DATA.push(p);
           mapa[k]=p;
+          paraInserir.push(p);
           add++;
         }
       });
       buildStats();buildFilters();render();renderManage();
-      setImportStatus('ok','✓ Importação concluída: '+add+' novo(s), '+upd+' preço(s) atualizado(s). Total agora: '+DATA.length+' produtos.');
+      setImportStatus('ok','✓ Importação concluída: '+add+' novo(s), '+upd+' preço(s) atualizado(s). Salvando na nuvem...');
+      // gravar na nuvem
+      (async function(){
+        try{
+          if(sbReady){
+            for(const p of paraAtualizar){ await sbUpdatePreco(p._id, p.preco); }
+            if(paraInserir.length){
+              const payload=paraInserir.map(p=>({cat:p.cat,fab:p.fab,prod:p.prod,ia:p.ia,preco:p.preco}));
+              const {data,error}=await sb.from('produtos').insert(payload).select();
+              if(error) throw error;
+              // atualizar os _id locais com os id reais do banco
+              if(data){ data.forEach((row,i)=>{ if(paraInserir[i]) paraInserir[i]._id=row.id; }); }
+            }
+            setImportStatus('ok','✓ Importação salva na nuvem: '+add+' novo(s), '+upd+' preço(s) atualizado(s). Total: '+DATA.length+'.');
+            buildStats();buildFilters();render();renderManage();
+          }else{
+            setImportStatus('ok','✓ Importado localmente: '+add+' novo(s), '+upd+' atualizado(s). (Sem conexão com a nuvem — não foi salvo online.)');
+          }
+        }catch(e){ setImportStatus('err','Importado na tela, mas houve erro ao salvar na nuvem: '+(e&&e.message?e.message:e)); }
+      })();
     }catch(err){ setImportStatus('err','Erro ao ler a planilha: '+(err&&err.message?err.message:err)); }
   };
   reader.onerror=function(){ setImportStatus('err','Erro ao abrir o arquivo.'); };
@@ -899,6 +999,13 @@ function init(){
     var c=document.getElementById('content');
     if(c) c.innerHTML='<div class="empty"><p>Erro ao carregar a lista: '+(err&&err.message?err.message:err)+'</p></div>';
   }
+  // sincronizar com a nuvem (se disponível)
+  (async function(){
+    try{
+      const ok=await carregarDoBanco();
+      if(ok){ buildStats();buildFilters();render();renderManage(); }
+    }catch(e){ if(window.console)console.warn('sync init:',e); }
+  })();
 }
 if(document.readyState==='loading'){
   document.addEventListener('DOMContentLoaded',init);
