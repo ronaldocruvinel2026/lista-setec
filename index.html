@@ -104,6 +104,13 @@ tbody tr:last-child td{border-bottom:0}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .import-note{font-size:12.5px;color:var(--muted);background:var(--gold-soft);border:1px solid #e8d8b0;border-radius:10px;padding:14px 16px;line-height:1.5;margin-top:16px}
 .import-note b{color:var(--ink)}
+.example-wrap{margin-top:14px}
+.example-label{font-size:12.5px;font-weight:700;color:var(--muted);margin-bottom:8px}
+.example-tbl{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.example-tbl th{background:var(--leaf-soft);color:var(--leaf-dark);text-align:left;padding:8px 12px;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--line)}
+.example-tbl td{padding:8px 12px;border-bottom:1px solid var(--line);color:var(--ink)}
+.example-tbl tbody tr:last-child td{border-bottom:0}
+.example-tbl td:last-child{text-align:right;font-weight:700;color:var(--leaf-dark)}
 .import-status{margin-top:14px;padding:13px 16px;border-radius:10px;font-size:14px;font-weight:600;display:none}
 .import-status.ok{display:block;background:var(--leaf-soft);color:var(--leaf-dark);border:1px solid #b6d4c1}
 .import-status.err{display:block;background:var(--danger-soft);color:#b23c1c;border:1px solid #f0c4b6}
@@ -160,6 +167,292 @@ footer{border-top:1px solid var(--line);padding:20px 0;text-align:center;font-si
 </style>
 </head>
 <body>
+<script>
+/* Leitor de planilha (carregado isolado; nunca bloqueia a página) */
+try{
+/* ===== Mini leitor de XLSX em JS puro (offline, sem dependências) =====
+   Suporta o necessário para esta aplicação:
+   - Abrir .xlsx (ZIP) e extrair entradas (stored + deflate)
+   - Ler sharedStrings.xml, workbook.xml (nomes de abas) e as planilhas
+   - Expor API compatível: XLSX.read(uint8,{type:'array'}) ->
+       { SheetNames:[...], Sheets:{ nome: sheetObj } }
+     e XLSX.utils.sheet_to_json(sheetObj,{header:1,defval:null}) -> array de linhas (array de células)
+   Implementa INFLATE (RFC1951) puro para descompactar entradas deflate do ZIP.
+*/
+(function(global){
+'use strict';
+
+/* ---------- INFLATE (RFC1951) ---------- */
+function inflateRaw(data){
+  var out=[]; var pos=0, bitBuf=0, bitCnt=0;
+  function getBit(){
+    if(bitCnt===0){ bitBuf=data[pos++]; bitCnt=8; }
+    var b=bitBuf&1; bitBuf>>=1; bitCnt--; return b;
+  }
+  function getBits(n){ var v=0; for(var i=0;i<n;i++) v|=getBit()<<i; return v; }
+  function buildTree(lengths){
+    var maxBits=0,i; for(i=0;i<lengths.length;i++) if(lengths[i]>maxBits) maxBits=lengths[i];
+    var blCount=new Array(maxBits+1).fill(0);
+    for(i=0;i<lengths.length;i++) blCount[lengths[i]]++;
+    blCount[0]=0;
+    var nextCode=new Array(maxBits+1).fill(0), code=0;
+    for(var bits=1;bits<=maxBits;bits++){ code=(code+blCount[bits-1])<<1; nextCode[bits]=code; }
+    var codes={};
+    for(i=0;i<lengths.length;i++){
+      var len=lengths[i];
+      if(len!==0){ codes[(len)+'_'+(nextCode[len])]=i; nextCode[len]++; }
+    }
+    return {codes:codes,maxBits:maxBits};
+  }
+  function decodeSym(tree){
+    var code=0,len=0;
+    while(len<=tree.maxBits){
+      code=(code<<1)|getBit(); len++;
+      var key=len+'_'+code;
+      if(tree.codes.hasOwnProperty(key)) return tree.codes[key];
+    }
+    throw new Error('Código Huffman inválido');
+  }
+  var LEN_BASE=[3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+  var LEN_EXTRA=[0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+  var DIST_BASE=[1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+  var DIST_EXTRA=[0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+
+  var fixedLit=null,fixedDist=null;
+  function fixedTrees(){
+    if(fixedLit) return;
+    var lit=new Array(288);
+    for(var i=0;i<=143;i++)lit[i]=8;
+    for(i=144;i<=255;i++)lit[i]=9;
+    for(i=256;i<=279;i++)lit[i]=7;
+    for(i=280;i<=287;i++)lit[i]=8;
+    fixedLit=buildTree(lit);
+    var dist=new Array(30).fill(5); fixedDist=buildTree(dist);
+  }
+
+  var final=0;
+  do{
+    final=getBit();
+    var type=getBits(2);
+    if(type===0){
+      bitBuf=0;bitCnt=0;
+      var len=data[pos]|(data[pos+1]<<8); pos+=4;
+      for(var i=0;i<len;i++) out.push(data[pos++]);
+    } else {
+      var litTree,distTree;
+      if(type===1){ fixedTrees(); litTree=fixedLit; distTree=fixedDist; }
+      else if(type===2){
+        var hlit=getBits(5)+257, hdist=getBits(5)+1, hclen=getBits(4)+4;
+        var order=[16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+        var clc=new Array(19).fill(0);
+        for(var j=0;j<hclen;j++) clc[order[j]]=getBits(3);
+        var clTree=buildTree(clc);
+        var lens=[]; 
+        while(lens.length<hlit+hdist){
+          var sym=decodeSym(clTree);
+          if(sym<16) lens.push(sym);
+          else if(sym===16){ var r=getBits(2)+3,prev=lens[lens.length-1]; while(r--)lens.push(prev); }
+          else if(sym===17){ var r2=getBits(3)+3; while(r2--)lens.push(0); }
+          else { var r3=getBits(7)+11; while(r3--)lens.push(0); }
+        }
+        litTree=buildTree(lens.slice(0,hlit));
+        distTree=buildTree(lens.slice(hlit));
+      } else throw new Error('Bloco deflate inválido');
+
+      while(true){
+        var s=decodeSym(litTree);
+        if(s===256) break;
+        if(s<256) out.push(s);
+        else {
+          s-=257;
+          var length=LEN_BASE[s]+getBits(LEN_EXTRA[s]);
+          var ds=decodeSym(distTree);
+          var dist=DIST_BASE[ds]+getBits(DIST_EXTRA[ds]);
+          var start=out.length-dist;
+          for(var k=0;k<length;k++) out.push(out[start+k]);
+        }
+      }
+    }
+  } while(!final);
+  return new Uint8Array(out);
+}
+
+/* ---------- ZIP reader (usa End of Central Directory) ---------- */
+function readZip(buf){
+  var dv=new DataView(buf.buffer||buf); 
+  var u8=buf;
+  // localizar EOCD (assinatura 0x06054b50) de trás pra frente
+  var eocd=-1;
+  for(var i=u8.length-22;i>=0;i--){
+    if(u8[i]===0x50&&u8[i+1]===0x4b&&u8[i+2]===0x05&&u8[i+3]===0x06){ eocd=i; break; }
+  }
+  if(eocd<0) throw new Error('Arquivo ZIP/xlsx inválido (EOCD não encontrado)');
+  var rd32=function(o){ return (u8[o])|(u8[o+1]<<8)|(u8[o+2]<<16)|(u8[o+3]<<24)>>>0; };
+  var rd16=function(o){ return (u8[o])|(u8[o+1]<<8); };
+  var cdOffset=rd32(eocd+16);
+  var cdCount=rd16(eocd+10);
+  var entries={};
+  var p=cdOffset;
+  for(var e=0;e<cdCount;e++){
+    if(rd32(p)!==0x02014b50) break;
+    var method=rd16(p+10);
+    var compSize=rd32(p+20);
+    var nameLen=rd16(p+28);
+    var extraLen=rd16(p+30);
+    var commentLen=rd16(p+32);
+    var localOff=rd32(p+42);
+    var name=new TextDecoder().decode(u8.subarray(p+46,p+46+nameLen));
+    // ler cabeçalho local para achar início dos dados
+    var ln=rd16(localOff+26), le=rd16(localOff+28);
+    var dataStart=localOff+30+ln+le;
+    var comp=u8.subarray(dataStart,dataStart+compSize);
+    entries[name]={method:method,data:comp};
+    p+=46+nameLen+extraLen+commentLen;
+  }
+  return entries;
+}
+function extract(entry){
+  if(entry.method===0) return entry.data;
+  if(entry.method===8) return inflateRaw(entry.data);
+  throw new Error('Método de compressão não suportado: '+entry.method);
+}
+function xmlText(u8){ return new TextDecoder('utf-8').decode(u8); }
+
+/* ---------- Parse mínimo de XML por regex (suficiente p/ estrutura simples do xlsx) ---------- */
+function parseSharedStrings(xml){
+  var res=[];
+  var siRe=/<si\b[^>]*>([\s\S]*?)<\/si>/g, m;
+  while((m=siRe.exec(xml))){
+    var inner=m[1];
+    // concatenar todos os <t>...</t>
+    var t='', tm, tRe=/<t\b[^>]*>([\s\S]*?)<\/t>/g;
+    var found=false;
+    while((tm=tRe.exec(inner))){ t+=decodeEntities(tm[1]); found=true; }
+    if(!found){ // <t/> vazio
+      t='';
+    }
+    res.push(t);
+  }
+  return res;
+}
+function decodeEntities(s){
+  return s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'")
+          .replace(/&#(\d+);/g,function(_,d){return String.fromCharCode(+d);})
+          .replace(/&#x([0-9a-fA-F]+);/g,function(_,h){return String.fromCharCode(parseInt(h,16));})
+          .replace(/&amp;/g,'&');
+}
+function colToNum(col){ // "AB" -> índice 0-based
+  var n=0; for(var i=0;i<col.length;i++){ n=n*26+(col.charCodeAt(i)-64); } return n-1;
+}
+function parseSheet(xml, shared){
+  var rows=[];
+  var rowRe=/<row\b[^>]*>([\s\S]*?)<\/row>|<row\b[^>]*\/>/g, rm;
+  while((rm=rowRe.exec(xml))){
+    var rowXml=rm[1]||'';
+    var cells=[];
+    var cRe=/<c\b([^>]*)(?:\/>|>([\s\S]*?)<\/c>)/g, cm;
+    while((cm=cRe.exec(rowXml))){
+      var attrs=cm[1]||''; var body=cm[2]||'';
+      var refM=/r="([A-Z]+)\d+"/.exec(attrs);
+      var tM=/t="([^"]+)"/.exec(attrs);
+      var type=tM?tM[1]:null;
+      var colIdx=refM?colToNum(refM[1]):cells.length;
+      var val=null;
+      if(type==='inlineStr'){
+        var isM=/<t\b[^>]*>([\s\S]*?)<\/t>/.exec(body);
+        val=isM?decodeEntities(isM[1]):'';
+      } else {
+        var vM=/<v\b[^>]*>([\s\S]*?)<\/v>/.exec(body);
+        if(vM){
+          var raw=vM[1];
+          if(type==='s'){ val=shared[parseInt(raw,10)]; }
+          else if(type==='str'){ val=decodeEntities(raw); }
+          else { var num=parseFloat(raw); val=isNaN(num)?raw:num; }
+        }
+      }
+      cells[colIdx]=val==null?null:val;
+    }
+    for(var i=0;i<cells.length;i++) if(cells[i]===undefined) cells[i]=null;
+    rows.push(cells);
+  }
+  return rows;
+}
+function parseWorkbook(xml){
+  var sheets=[]; var re=/<sheet\b[^>]*name="([^"]+)"[^>]*r:id="([^"]+)"[^>]*\/?>|<sheet\b[^>]*r:id="([^"]+)"[^>]*name="([^"]+)"[^>]*\/?>/g, m;
+  // abordagem mais simples: capturar name e r:id em qualquer ordem
+  var re2=/<sheet\b([^>]*)\/?>/g, sm;
+  while((sm=re2.exec(xml))){
+    var a=sm[1];
+    var nameM=/name="([^"]+)"/.exec(a);
+    var ridM=/r:id="([^"]+)"/.exec(a);
+    var sidM=/sheetId="([^"]+)"/.exec(a);
+    if(nameM) sheets.push({name:decodeEntities(nameM[1]), rid:ridM?ridM[1]:null, sheetId:sidM?sidM[1]:null});
+  }
+  return sheets;
+}
+function parseRels(xml){
+  var map={}; var re=/<Relationship\b([^>]*)\/?>/g, m;
+  while((m=re.exec(xml))){
+    var a=m[1];
+    var idM=/Id="([^"]+)"/.exec(a);
+    var tgM=/Target="([^"]+)"/.exec(a);
+    if(idM&&tgM) map[idM[1]]=tgM[1];
+  }
+  return map;
+}
+
+var XLSX={
+  read:function(input,opts){
+    var u8 = input instanceof Uint8Array ? input : new Uint8Array(input);
+    var entries=readZip(u8);
+    var shared=[];
+    if(entries['xl/sharedStrings.xml']) shared=parseSharedStrings(xmlText(extract(entries['xl/sharedStrings.xml'])));
+    var wbXml=xmlText(extract(entries['xl/workbook.xml']));
+    var wbSheets=parseWorkbook(wbXml);
+    var rels={};
+    if(entries['xl/_rels/workbook.xml.rels']) rels=parseRels(xmlText(extract(entries['xl/_rels/workbook.xml.rels'])));
+    var SheetNames=[], Sheets={};
+    wbSheets.forEach(function(s,idx){
+      var target=null;
+      if(s.rid&&rels[s.rid]) target=rels[s.rid];
+      var path=null;
+      if(target){ path = target.charAt(0)==='/' ? target.slice(1) : 'xl/'+target.replace(/^\.\//,''); }
+      if(!path||!entries[path]){
+        // fallback por convenção
+        var guess='xl/worksheets/sheet'+(idx+1)+'.xml';
+        if(entries[guess]) path=guess;
+      }
+      if(path&&entries[path]){
+        var rows=parseSheet(xmlText(extract(entries[path])), shared);
+        SheetNames.push(s.name);
+        Sheets[s.name]={__rows:rows};
+      }
+    });
+    return {SheetNames:SheetNames, Sheets:Sheets};
+  },
+  utils:{
+    sheet_to_json:function(sheet,opts){
+      opts=opts||{};
+      var rows=sheet.__rows||[];
+      if(opts.header===1){
+        var defval=('defval' in opts)?opts.defval:null;
+        return rows.map(function(r){ return r.map(function(c){ return c==null?defval:c; }); });
+      }
+      // modo objeto (não usado aqui, mas por compatibilidade)
+      if(!rows.length) return [];
+      var headers=rows[0];
+      return rows.slice(1).map(function(r){
+        var o={}; headers.forEach(function(h,i){ o[h]=r[i]==null?(opts.defval==null?undefined:opts.defval):r[i]; }); return o;
+      });
+    }
+  }
+};
+
+global.XLSX=XLSX;
+})(typeof window!=='undefined'?window:this);
+
+}catch(_e){ if(window.console)console.warn("XLSX indisponível:",_e); }
+</script>
 <header>
   <div class="wrap">
     <div class="head-top">
@@ -177,7 +470,7 @@ footer{border-top:1px solid var(--line);padding:20px 0;text-align:center;font-si
     </div>
     <div class="tabs">
       <button class="tab on" id="tabList">Lista de Preços</button>
-      <button class="tab" id="tabImport">Gerenciar</button>
+      <button class="tab" id="tabImport">Importar & Gerenciar</button>
     </div>
   </div>
 </header>
@@ -219,6 +512,32 @@ footer{border-top:1px solid var(--line);padding:20px 0;text-align:center;font-si
 <div class="panel" id="importView">
   <main>
     <div class="wrap">
+
+      <h2 class="section-title"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="m9 15 3-3 3 3"/></svg>Importar planilha</h2>
+      <div class="import-box" id="dropBox">
+        <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M12 18v-6"/><path d="m9 15 3-3 3 3"/></svg>
+        <h3>Adicionar produtos de uma planilha</h3>
+        <p>Selecione ou arraste o arquivo Excel (.xlsx). Os produtos serão <b>somados</b> à lista atual.</p>
+        <button class="btn" id="pickBtn">Escolher arquivo</button>
+        <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none">
+      </div>
+      <div class="import-status" id="importStatus"></div>
+      <div class="import-note">
+        <b>Formato da planilha (.xlsx):</b> a primeira linha deve conter os títulos das colunas, na ordem: <b>FABRICANTE</b>, <b>PRODUTO</b>, <b>PRINCIPIO ATIVO (I.A)</b> e <b>PREÇO</b>. A coluna Princípio Ativo é opcional. Preços em branco ou zerados entram como "sem preço". Para separar por tipo, use abas com o nome <b>DEFENSIVOS</b> e/ou <b>ESPECIALIDADES</b> — se a planilha tiver só uma aba, tudo entra como Defensivos. Produtos com fabricante + nome iguais aos já existentes são ignorados (não duplica).
+      </div>
+      <div class="example-wrap">
+        <div class="example-label">Exemplo de como a planilha deve estar:</div>
+        <table class="example-tbl">
+          <thead><tr><th>FABRICANTE</th><th>PRODUTO</th><th>PRINCIPIO ATIVO (I.A)</th><th>PREÇO</th></tr></thead>
+          <tbody>
+            <tr><td>SYNGENTA</td><td>ELESTAL NEO</td><td>Acetamiprido + Lambda</td><td>245,80</td></tr>
+            <tr><td>NORTOX</td><td>GLIFOSATO 480</td><td>Glifosato</td><td>32,50</td></tr>
+            <tr><td>FMC</td><td>TALISMAN</td><td>Bifentrina</td><td>178,00</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="divider"></div>
 
       <h2 class="section-title"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>Gerenciar produtos (banco de dados)</h2>
       <div class="manage-bar">
@@ -455,6 +774,83 @@ document.getElementById('exportBtn').onclick=()=>{
   URL.revokeObjectURL(a.href);
 };
 
+/* ===== IMPORTAR PLANILHA (adiciona à lista) ===== */
+function findCol(headers,targets){
+  const H=headers.map(h=>norm(h).trim());
+  for(const t of targets){const tn=norm(t);let i=H.findIndex(h=>h===tn);if(i<0)i=H.findIndex(h=>h.includes(tn));if(i>=0)return i;}
+  return -1;
+}
+function parseSheetRows(rows,cat){
+  if(!rows||!rows.length)return [];
+  const headers=rows[0].map(x=>x==null?'':String(x));
+  const iFab=findCol(headers,['fabricante']);
+  const iProd=findCol(headers,['produto']);
+  const iIa=findCol(headers,['principio ativo','i.a','ingrediente']);
+  const iPreco=findCol(headers,['preco','preço','valor']);
+  const out=[];
+  for(let r=1;r<rows.length;r++){
+    const row=rows[r];if(!row)continue;
+    const fab=iFab>=0&&row[iFab]!=null?String(row[iFab]).trim():'';
+    const prod=iProd>=0&&row[iProd]!=null?String(row[iProd]).trim():'';
+    const ia=iIa>=0&&row[iIa]!=null?String(row[iIa]).trim():'';
+    if(!fab&&!prod)continue;
+    let preco=null;
+    if(iPreco>=0&&row[iPreco]!=null&&row[iPreco]!==''){
+      const vRaw=parseFloat(row[iPreco]);
+      if(!isNaN(vRaw)&&vRaw>0)preco=vRaw;
+    }
+    out.push({cat,fab,prod,ia,preco});
+  }
+  return out;
+}
+function setImportStatus(cls,msg){
+  const st=document.getElementById('importStatus');
+  if(!st)return;
+  st.className='import-status '+cls;
+  st.textContent=msg;
+}
+function handleFile(file){
+  if(!file)return;
+  setImportStatus('','');
+  if(typeof XLSX==='undefined'||!XLSX.read){
+    setImportStatus('err','Leitor de planilha indisponível. Se estiver offline, tente novamente conectado à internet uma vez.');
+    return;
+  }
+  const reader=new FileReader();
+  reader.onload=function(e){
+    try{
+      const wb=XLSX.read(new Uint8Array(e.target.result),{type:'array'});
+      let novos=[];
+      wb.SheetNames.forEach(function(sn){
+        const up=norm(sn);let cat=null;
+        if(up.includes('defensiv'))cat='DEFENSIVOS';else if(up.includes('especialidad'))cat='ESPECIALIDADES';
+        if(cat){const rows=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:null});novos=novos.concat(parseSheetRows(rows,cat));}
+      });
+      if(!novos.length){
+        const sn=wb.SheetNames[0];
+        const rows=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:null});
+        novos=parseSheetRows(rows,'DEFENSIVOS');
+      }
+      if(!novos.length){ setImportStatus('err','Nenhum produto encontrado na planilha. Confira as abas e colunas.'); return; }
+      // somar à lista, evitando duplicatas (mesmo fabricante+produto)
+      const existentes=new Set(DATA.map(function(p){return norm(p.fab)+'|'+norm(p.prod);}));
+      let add=0,dup=0;
+      novos.forEach(function(p){
+        const k=norm(p.fab)+'|'+norm(p.prod);
+        if(existentes.has(k)){dup++;return;}
+        existentes.add(k);
+        p._id=nextId++;
+        DATA.push(p);
+        add++;
+      });
+      buildStats();buildFilters();render();renderManage();
+      setImportStatus('ok','✓ '+add+' produto(s) adicionado(s).'+(dup?(' '+dup+' já existiam e foram ignorados.'):'')+' Total agora: '+DATA.length+'.');
+    }catch(err){ setImportStatus('err','Erro ao ler a planilha: '+(err&&err.message?err.message:err)); }
+  };
+  reader.onerror=function(){ setImportStatus('err','Erro ao abrir o arquivo.'); };
+  reader.readAsArrayBuffer(file);
+}
+
 /* tabs */
 function showTab(t){
   const list=t==='list';
@@ -472,6 +868,19 @@ document.getElementById('fabSel').onchange=e=>{state.fab=e.target.value;render()
 document.getElementById('sortSel').onchange=e=>{state.sort=e.target.value;render();};
 document.getElementById('vGrid').onclick=()=>{state.view='grid';document.getElementById('vGrid').classList.add('on');document.getElementById('vTable').classList.remove('on');render();};
 document.getElementById('vTable').onclick=()=>{state.view='table';document.getElementById('vTable').classList.add('on');document.getElementById('vGrid').classList.remove('on');render();};
+
+/* importar - conectar botões */
+(function(){
+  const pick=document.getElementById('pickBtn');
+  const inp=document.getElementById('fileInput');
+  const drop=document.getElementById('dropBox');
+  if(pick&&inp){ pick.onclick=()=>inp.click(); inp.onchange=e=>{ if(e.target.files&&e.target.files[0])handleFile(e.target.files[0]); }; }
+  if(drop){
+    ['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('drag');}));
+    ['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('drag');}));
+    drop.addEventListener('drop',e=>{ if(e.dataTransfer.files&&e.dataTransfer.files[0])handleFile(e.dataTransfer.files[0]); });
+  }
+})();
 
 function init(){
   try{
