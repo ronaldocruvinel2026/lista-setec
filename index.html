@@ -72,7 +72,7 @@ main{padding:22px 0 60px}
 .pc-venc{font-size:10.5px;font-weight:700;letter-spacing:.5px;color:var(--muted);opacity:.8;white-space:nowrap}
 .t-venc{font-size:11.5px;color:var(--muted);text-align:center;white-space:nowrap}
 
-.tbl-wrap{background:#fff;border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.tbl-wrap{background:#fff;border:1px solid var(--line);border-radius:14px;overflow-x:auto;-webkit-overflow-scrolling:touch}
 table{width:100%;border-collapse:collapse;font-size:13.5px}
 thead th{background:var(--leaf-dark);color:#fff;text-align:left;padding:11px 14px;font-size:11.5px;text-transform:uppercase;letter-spacing:.6px;font-weight:700;cursor:pointer;user-select:none;white-space:nowrap}
 thead th:hover{background:var(--leaf)}
@@ -128,8 +128,8 @@ tbody tr:last-child td{border-bottom:0}
 .sel-badge{font-size:13px;font-weight:700;color:var(--danger);background:var(--danger-soft);padding:8px 14px;border-radius:8px;display:none}
 .sel-badge.on{display:inline-block}
 
-.mtable-wrap{background:#fff;border:1px solid var(--line);border-radius:14px;overflow:hidden;max-height:560px;overflow-y:auto}
-table.mtable{width:100%;border-collapse:collapse;font-size:13.5px}
+.mtable-wrap{background:#fff;border:1px solid var(--line);border-radius:14px;max-height:560px;overflow:auto;-webkit-overflow-scrolling:touch}
+table.mtable{width:100%;border-collapse:collapse;font-size:13.5px;min-width:640px}
 table.mtable thead th{position:sticky;top:0;background:var(--leaf-dark);color:#fff;text-align:left;padding:11px 14px;font-size:11.5px;text-transform:uppercase;letter-spacing:.5px;font-weight:700;z-index:2}
 table.mtable tbody td{padding:9px 14px;border-bottom:1px solid var(--line);vertical-align:middle}
 table.mtable tbody tr:hover{background:var(--leaf-soft)}
