@@ -693,8 +693,11 @@ async function carregarDoBanco(){
 
 async function sbUpdatePreco(id, preco){
   if(!sbReady) return;
-  try{ await sb.from('produtos').update({preco:preco}).eq('id',id); }
-  catch(e){ showSync('err','Erro ao salvar preço na nuvem.'); }
+  try{
+    const {error}=await sb.from('produtos').update({preco:preco}).eq('id',id);
+    if(error) throw error;
+  }
+  catch(e){ showSync('err','Erro ao salvar preço na nuvem. A alteração será perdida ao recarregar.'); }
 }
 async function sbDelete(ids){
   if(!sbReady) return;
@@ -806,8 +809,11 @@ function saveCat(id, novaCat){
 }
 async function sbUpdateCampos(id, campos){
   if(!sbReady) return;
-  try{ await sb.from('produtos').update(campos).eq('id',id); }
-  catch(e){ if(window.console)console.warn('Erro ao salvar:',e); }
+  try{
+    const {error}=await sb.from('produtos').update(campos).eq('id',id);
+    if(error) throw error;
+  }
+  catch(e){ alert('Não foi possível salvar a alteração na nuvem: '+(e&&e.message?e.message:e)+'\n\nA alteração aparece na tela, mas será perdida ao recarregar. Verifique a conexão e tente de novo.'); }
 }
 function renderManage(){
   const r=mFiltered();
@@ -930,6 +936,12 @@ function normalizaGrupo(txt){
 }
 function normalizaVenc(v){
   if(v==null||v==='') return '';
+  // célula que veio como data real do Excel (objeto Date)
+  if(v instanceof Date && !isNaN(v.getTime())){
+    const dd=String(v.getDate()).padStart(2,'0');
+    const mm=String(v.getMonth()+1).padStart(2,'0');
+    return dd+'/'+mm+'/'+v.getFullYear();
+  }
   // pode vir como número serial do Excel (data)
   if(typeof v==='number' && v>20000 && v<80000){
     // serial Excel -> data (base 1900; ajuste do bug de 1900 bissexto)
@@ -947,6 +959,16 @@ function normalizaVenc(v){
   // mm/aaaa -> assume dia 30
   m=/^(\d{1,2})\s*\/\s*(\d{4})$/.exec(s);
   if(m){ return '30/'+String(m[1]).padStart(2,'0')+'/'+m[2]; }
+  // aaaa-mm-dd (formato ISO, comum em exportações)
+  m=/^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+  if(m){ return String(m[3]).padStart(2,'0')+'/'+String(m[2]).padStart(2,'0')+'/'+m[1]; }
+  // último recurso: texto que o navegador reconhece como data (ex.: "Tue Jun 15 2027")
+  const d2=new Date(s);
+  if(!isNaN(d2.getTime())){
+    const dd=String(d2.getDate()).padStart(2,'0');
+    const mm=String(d2.getMonth()+1).padStart(2,'0');
+    return dd+'/'+mm+'/'+d2.getFullYear();
+  }
   return s;
 }
 function parsePreco(v){
@@ -1062,8 +1084,16 @@ function handleFile(file){
       (async function(){
         try{
           if(sbReady){
-            for(const p of paraAtualizar){
-              await sb.from('produtos').update({preco:p.preco, cat:p.cat, ia:p.ia, vencimento:p.venc||null}).eq('id',p._id);
+            // atualizar em lotes, verificando erros de verdade
+            let falhas=0, ultimoErro=null;
+            const LOTE=25;
+            for(let i=0;i<paraAtualizar.length;i+=LOTE){
+              const fatia=paraAtualizar.slice(i,i+LOTE);
+              setImportStatus('ok','Salvando na nuvem... ('+Math.min(i+LOTE,paraAtualizar.length)+'/'+paraAtualizar.length+')');
+              const results=await Promise.all(fatia.map(p=>
+                sb.from('produtos').update({preco:p.preco, cat:p.cat, ia:p.ia, vencimento:p.venc||null}).eq('id',p._id)
+              ));
+              results.forEach(r=>{ if(r&&r.error){ falhas++; ultimoErro=r.error; } });
             }
             if(paraInserir.length){
               const payload=paraInserir.map(p=>({cat:p.cat,fab:p.fab,prod:p.prod,ia:p.ia,preco:p.preco,vencimento:p.venc||null}));
@@ -1071,7 +1101,11 @@ function handleFile(file){
               if(error) throw error;
               if(data){ data.forEach((row,i)=>{ if(paraInserir[i]) paraInserir[i]._id=row.id; }); }
             }
-            setImportStatus('ok','✓ Importação salva na nuvem: '+add+' novo(s), '+upd+' atualizado(s). Total: '+DATA.length+'.');
+            if(falhas>0){
+              setImportStatus('err','Atenção: '+falhas+' produto(s) não foram salvos na nuvem. '+(ultimoErro&&ultimoErro.message?('Motivo: '+ultimoErro.message):'')+' Verifique a conexão e importe novamente.');
+            }else{
+              setImportStatus('ok','✓ Importação salva na nuvem: '+add+' novo(s), '+upd+' atualizado(s). Total: '+DATA.length+'.');
+            }
             buildStats();buildFilters();render();renderManage();
           }else{
             setImportStatus('ok','✓ Importado localmente: '+add+' novo(s), '+upd+' atualizado(s). (Sem conexão com a nuvem — não foi salvo online.)');
